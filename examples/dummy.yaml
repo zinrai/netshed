@@ -1,0 +1,4 @@
+networks:
+  - name: "dummy0"
+    type: "dummy"
+    address: "10.0.0.1/24"
