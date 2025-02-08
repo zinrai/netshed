@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -50,17 +51,43 @@ func (m *MasqueradeManager) Add(network string) error {
 		return err
 	}
 
+	link, err := netlink.LinkByName(network)
+	if err != nil {
+		return fmt.Errorf("failed to get interface %s: %v", network, err)
+	}
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return fmt.Errorf("failed to get addresses for %s: %v", network, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("no IPv4 address found for %s", network)
+	}
+
 	rule := &nftables.Rule{
 		Table: table,
 		Chain: chain,
 		Exprs: []expr.Any{
-			&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
+			&expr.Payload{
+				DestRegister: 1,
+				Base:         expr.PayloadBaseNetworkHeader,
+				Offset:       12, // IPv4 source address offset
+				Len:          4,  // IPv4 address length
+			},
+			&expr.Bitwise{
+				DestRegister:   1,
+				SourceRegister: 1,
+				Len:            4,
+				Mask:           addrs[0].IPNet.Mask,
+				Xor:            []byte{0, 0, 0, 0},
+			},
 			&expr.Cmp{
 				Op:       expr.CmpOpEq,
 				Register: 1,
-				Data:     []byte(network),
+				Data:     addrs[0].IP.Mask(addrs[0].IPNet.Mask),
 			},
+			// masquerade
 			&expr.Masq{},
+			// comment for rule identification
 			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
 			&expr.Cmp{
 				Op:       expr.CmpOpEq,
