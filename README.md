@@ -2,9 +2,7 @@
 
 A command-line tool to manage network interfaces and NAT masquerading on Linux.
 
-I had been looking for a tool to set up temporary network interfaces for testing environments that would be automatically cleared on reboot.
-
-Instead of executing commands or shell scripts each time, I wanted to declaratively describe test networks using configuration files.
+I had been looking for a tool to set up temporary network interfaces for testing environments that would be automatically cleared on reboot. Instead of executing commands or shell scripts each time, I wanted to declaratively describe test networks using configuration files.
 
 
 ## Features
@@ -22,8 +20,14 @@ Instead of executing commands or shell scripts each time, I wanted to declarativ
 
 ## Installation
 
+Using go install:
 ```bash
 $ go install github.com/zinrai/netshed@latest
+```
+
+Build from source:
+```bash
+$ go build -o netshed cmd/netshed/main.go
 ```
 
 ## Usage
