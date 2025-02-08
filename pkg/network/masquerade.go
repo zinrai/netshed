@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"os/exec"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -22,6 +23,14 @@ func NewMasqueradeManager() (*MasqueradeManager, error) {
 		return nil, fmt.Errorf("failed to initialize nftables: %v", err)
 	}
 	return &MasqueradeManager{conn: conn}, nil
+}
+
+func enableIPForwarding() error {
+	cmd := exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to enable IP forwarding: %v: %s", err, output)
+	}
+	return nil
 }
 
 func (m *MasqueradeManager) ensureNATTable() (*nftables.Table, *nftables.Chain, error) {
@@ -46,6 +55,10 @@ func (m *MasqueradeManager) ensureNATTable() (*nftables.Table, *nftables.Chain, 
 }
 
 func (m *MasqueradeManager) Add(network string) error {
+	if err := enableIPForwarding(); err != nil {
+		return err
+	}
+
 	table, chain, err := m.ensureNATTable()
 	if err != nil {
 		return err
