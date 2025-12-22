@@ -16,7 +16,7 @@ I had been looking for a tool to set up temporary network interfaces for testing
 
 - Linux
 - Root privileges (sudo)
-- nftables
+- nftables (nft command)
 
 ## Installation
 

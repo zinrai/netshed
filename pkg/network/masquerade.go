@@ -1,61 +1,21 @@
 package network
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 
-	"github.com/google/nftables"
-	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netlink"
 )
 
 const (
 	commentFmt = "netshed:%s"
-	// NFTNL_UDATA_RULE_COMMENT is the TLV type for rule comment
-	udataTypeComment = 0x00
 )
 
-type MasqueradeManager struct {
-	conn *nftables.Conn
-}
-
-// encodeComment encodes a comment string into TLV format for nftables UserData
-func encodeComment(comment string) []byte {
-	// TLV format: Type (1 byte) + Length (1 byte) + Value (comment bytes)
-	data := make([]byte, 2+len(comment)+1) // +1 for null terminator
-	data[0] = udataTypeComment
-	data[1] = byte(len(comment) + 1) // length includes null terminator
-	copy(data[2:], comment)
-	data[2+len(comment)] = 0x00 // null terminator
-	return data
-}
-
-// decodeComment extracts comment string from TLV format UserData
-func decodeComment(userData []byte) string {
-	if len(userData) < 3 {
-		return ""
-	}
-	if userData[0] != udataTypeComment {
-		return ""
-	}
-	length := int(userData[1])
-	if len(userData) < 2+length {
-		return ""
-	}
-	// Remove null terminator if present
-	comment := userData[2 : 2+length]
-	if len(comment) > 0 && comment[len(comment)-1] == 0x00 {
-		comment = comment[:len(comment)-1]
-	}
-	return string(comment)
-}
+type MasqueradeManager struct{}
 
 func NewMasqueradeManager() (*MasqueradeManager, error) {
-	conn, err := nftables.New()
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize nftables: %v", err)
-	}
-	return &MasqueradeManager{conn: conn}, nil
+	return &MasqueradeManager{}, nil
 }
 
 func enableIPForwarding() error {
@@ -66,25 +26,20 @@ func enableIPForwarding() error {
 	return nil
 }
 
-func (m *MasqueradeManager) ensureNATTable() (*nftables.Table, *nftables.Chain, error) {
-	table := m.conn.AddTable(&nftables.Table{
-		Family: nftables.TableFamilyIPv4,
-		Name:   "nat",
-	})
-
-	chain := m.conn.AddChain(&nftables.Chain{
-		Name:     "postrouting",
-		Table:    table,
-		Type:     nftables.ChainTypeNAT,
-		Hooknum:  nftables.ChainHookPostrouting,
-		Priority: nftables.ChainPriorityNATSource,
-	})
-
-	if err := m.conn.Flush(); err != nil {
-		return nil, nil, fmt.Errorf("failed to ensure NAT table and chain: %v", err)
+func (m *MasqueradeManager) ensureNATTable() error {
+	// Add table (idempotent)
+	if err := exec.Command("nft", "add", "table", "ip", "nat").Run(); err != nil {
+		return fmt.Errorf("failed to add nat table: %v", err)
 	}
 
-	return table, chain, nil
+	// Add chain (idempotent)
+	cmd := exec.Command("nft", "add", "chain", "ip", "nat", "postrouting",
+		"{ type nat hook postrouting priority srcnat; }")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to add postrouting chain: %v", err)
+	}
+
+	return nil
 }
 
 func (m *MasqueradeManager) Add(network string) error {
@@ -92,11 +47,11 @@ func (m *MasqueradeManager) Add(network string) error {
 		return err
 	}
 
-	table, chain, err := m.ensureNATTable()
-	if err != nil {
+	if err := m.ensureNATTable(); err != nil {
 		return err
 	}
 
+	// Get subnet from interface
 	link, err := netlink.LinkByName(network)
 	if err != nil {
 		return fmt.Errorf("failed to get interface %s: %v", network, err)
@@ -109,88 +64,54 @@ func (m *MasqueradeManager) Add(network string) error {
 		return fmt.Errorf("no IPv4 address found for %s", network)
 	}
 
+	subnet := addrs[0].IPNet.String()
 	comment := fmt.Sprintf(commentFmt, network)
-	rule := &nftables.Rule{
-		Table:    table,
-		Chain:    chain,
-		UserData: encodeComment(comment),
-		Exprs: []expr.Any{
-			// Load source address from IPv4 header
-			&expr.Payload{
-				DestRegister: 1,
-				Base:         expr.PayloadBaseNetworkHeader,
-				Offset:       12,
-				Len:          4,
-			},
-			// Apply netmask
-			&expr.Bitwise{
-				DestRegister:   1,
-				SourceRegister: 1,
-				Len:            4,
-				Mask:           addrs[0].IPNet.Mask,
-				Xor:            []byte{0, 0, 0, 0},
-			},
-			// Compare with network address
-			&expr.Cmp{
-				Op:       expr.CmpOpEq,
-				Register: 1,
-				Data:     addrs[0].IP.Mask(addrs[0].IPNet.Mask),
-			},
-			// Masquerade action (must be last)
-			&expr.Masq{},
-		},
-	}
 
-	m.conn.AddRule(rule)
-
-	if err := m.conn.Flush(); err != nil {
-		return fmt.Errorf("failed to add masquerade rule: %v", err)
+	// Add masquerade rule
+	cmd := exec.Command("nft", "add", "rule", "ip", "nat", "postrouting",
+		"ip", "saddr", subnet, "masquerade", "comment", fmt.Sprintf(`"%s"`, comment))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to add masquerade rule: %v: %s", err, output)
 	}
 
 	return nil
 }
 
+type nftOutput struct {
+	Nftables []struct {
+		Rule *struct {
+			Handle  int    `json:"handle"`
+			Comment string `json:"comment"`
+		} `json:"rule,omitempty"`
+	} `json:"nftables"`
+}
+
 func (m *MasqueradeManager) Remove(network string) error {
-	table := &nftables.Table{
-		Family: nftables.TableFamilyIPv4,
-		Name:   "nat",
-	}
-
-	chain := &nftables.Chain{
-		Name:  "postrouting",
-		Table: table,
-	}
-
-	rules, err := m.conn.GetRules(table, chain)
-	if err != nil {
-		return fmt.Errorf("failed to get rules: %v", err)
-	}
-
 	comment := fmt.Sprintf(commentFmt, network)
-	for _, rule := range rules {
-		if hasComment(rule, comment) && hasMasquerade(rule) {
-			if err := m.conn.DelRule(rule); err != nil {
-				return fmt.Errorf("failed to delete rule: %v", err)
+
+	// Get rules in JSON format
+	cmd := exec.Command("nft", "--json", "list", "chain", "ip", "nat", "postrouting")
+	output, err := cmd.Output()
+	if err != nil {
+		// Chain might not exist, which is fine
+		return nil
+	}
+
+	var result nftOutput
+	if err := json.Unmarshal(output, &result); err != nil {
+		return fmt.Errorf("failed to parse nft output: %v", err)
+	}
+
+	// Find and delete rules with matching comment
+	for _, item := range result.Nftables {
+		if item.Rule != nil && item.Rule.Comment == comment {
+			delCmd := exec.Command("nft", "delete", "rule", "ip", "nat", "postrouting",
+				"handle", fmt.Sprintf("%d", item.Rule.Handle))
+			if output, err := delCmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to delete rule: %v: %s", err, output)
 			}
 		}
 	}
 
-	if err := m.conn.Flush(); err != nil {
-		return fmt.Errorf("failed to remove masquerade rule: %v", err)
-	}
-
 	return nil
-}
-
-func hasComment(rule *nftables.Rule, comment string) bool {
-	return decodeComment(rule.UserData) == comment
-}
-
-func hasMasquerade(rule *nftables.Rule) bool {
-	for _, e := range rule.Exprs {
-		if _, ok := e.(*expr.Masq); ok {
-			return true
-		}
-	}
-	return false
 }
