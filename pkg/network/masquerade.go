@@ -11,10 +11,43 @@ import (
 
 const (
 	commentFmt = "netshed:%s"
+	// NFTNL_UDATA_RULE_COMMENT is the TLV type for rule comment
+	udataTypeComment = 0x00
 )
 
 type MasqueradeManager struct {
 	conn *nftables.Conn
+}
+
+// encodeComment encodes a comment string into TLV format for nftables UserData
+func encodeComment(comment string) []byte {
+	// TLV format: Type (1 byte) + Length (1 byte) + Value (comment bytes)
+	data := make([]byte, 2+len(comment)+1) // +1 for null terminator
+	data[0] = udataTypeComment
+	data[1] = byte(len(comment) + 1) // length includes null terminator
+	copy(data[2:], comment)
+	data[2+len(comment)] = 0x00 // null terminator
+	return data
+}
+
+// decodeComment extracts comment string from TLV format UserData
+func decodeComment(userData []byte) string {
+	if len(userData) < 3 {
+		return ""
+	}
+	if userData[0] != udataTypeComment {
+		return ""
+	}
+	length := int(userData[1])
+	if len(userData) < 2+length {
+		return ""
+	}
+	// Remove null terminator if present
+	comment := userData[2 : 2+length]
+	if len(comment) > 0 && comment[len(comment)-1] == 0x00 {
+		comment = comment[:len(comment)-1]
+	}
+	return string(comment)
 }
 
 func NewMasqueradeManager() (*MasqueradeManager, error) {
@@ -76,16 +109,20 @@ func (m *MasqueradeManager) Add(network string) error {
 		return fmt.Errorf("no IPv4 address found for %s", network)
 	}
 
+	comment := fmt.Sprintf(commentFmt, network)
 	rule := &nftables.Rule{
-		Table: table,
-		Chain: chain,
+		Table:    table,
+		Chain:    chain,
+		UserData: encodeComment(comment),
 		Exprs: []expr.Any{
+			// Load source address from IPv4 header
 			&expr.Payload{
 				DestRegister: 1,
 				Base:         expr.PayloadBaseNetworkHeader,
-				Offset:       12, // IPv4 source address offset
-				Len:          4,  // IPv4 address length
+				Offset:       12,
+				Len:          4,
 			},
+			// Apply netmask
 			&expr.Bitwise{
 				DestRegister:   1,
 				SourceRegister: 1,
@@ -93,20 +130,14 @@ func (m *MasqueradeManager) Add(network string) error {
 				Mask:           addrs[0].IPNet.Mask,
 				Xor:            []byte{0, 0, 0, 0},
 			},
+			// Compare with network address
 			&expr.Cmp{
 				Op:       expr.CmpOpEq,
 				Register: 1,
 				Data:     addrs[0].IP.Mask(addrs[0].IPNet.Mask),
 			},
-			// masquerade
+			// Masquerade action (must be last)
 			&expr.Masq{},
-			// comment for rule identification
-			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
-			&expr.Cmp{
-				Op:       expr.CmpOpEq,
-				Register: 1,
-				Data:     []byte(fmt.Sprintf(commentFmt, network)),
-			},
 		},
 	}
 
@@ -152,14 +183,7 @@ func (m *MasqueradeManager) Remove(network string) error {
 }
 
 func hasComment(rule *nftables.Rule, comment string) bool {
-	for _, e := range rule.Exprs {
-		if cmp, ok := e.(*expr.Cmp); ok {
-			if string(cmp.Data) == comment {
-				return true
-			}
-		}
-	}
-	return false
+	return decodeComment(rule.UserData) == comment
 }
 
 func hasMasquerade(rule *nftables.Rule) bool {
