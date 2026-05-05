@@ -3,8 +3,8 @@ module github.com/zinrai/netshed
 go 1.23.3
 
 require (
+	github.com/goccy/go-yaml v1.19.2
 	github.com/vishvananda/netlink v1.3.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

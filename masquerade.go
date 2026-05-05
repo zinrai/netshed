@@ -1,4 +1,4 @@
-package network
+package main
 
 import (
 	"encoding/json"
@@ -104,12 +104,13 @@ func (m *MasqueradeManager) Remove(network string) error {
 
 	// Find and delete rules with matching comment
 	for _, item := range result.Nftables {
-		if item.Rule != nil && item.Rule.Comment == comment {
-			delCmd := exec.Command("nft", "delete", "rule", "ip", "nat", "postrouting",
-				"handle", fmt.Sprintf("%d", item.Rule.Handle))
-			if output, err := delCmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("failed to delete rule: %v: %s", err, output)
-			}
+		if item.Rule == nil || item.Rule.Comment != comment {
+			continue
+		}
+		delCmd := exec.Command("nft", "delete", "rule", "ip", "nat", "postrouting",
+			"handle", fmt.Sprintf("%d", item.Rule.Handle))
+		if output, err := delCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to delete rule: %v: %s", err, output)
 		}
 	}
 

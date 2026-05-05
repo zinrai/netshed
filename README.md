@@ -27,7 +27,7 @@ $ go install github.com/zinrai/netshed@latest
 
 Build from source:
 ```bash
-$ go build -o netshed cmd/netshed/main.go
+$ go build -o netshed
 ```
 
 ## Usage
