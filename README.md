@@ -18,18 +18,6 @@ I had been looking for a tool to set up temporary network interfaces for testing
 - Root privileges (sudo)
 - nftables (nft command)
 
-## Installation
-
-Using go install:
-```bash
-$ go install github.com/zinrai/netshed@latest
-```
-
-Build from source:
-```bash
-$ go build -o netshed
-```
-
 ## Usage
 
 Create network interfaces:
